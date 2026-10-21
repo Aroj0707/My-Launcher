@@ -1,0 +1,341 @@
+name: Build APK
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate project files
+        run: |
+          cat > settings.gradle <<'EOF_TV'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = 'TVHome'
+          include ':app'
+          EOF_TV
+          cat > build.gradle <<'EOF_TV'
+          plugins { id 'com.android.application' version '8.5.2' apply false }
+          EOF_TV
+          mkdir -p app
+          cat > app/build.gradle <<'EOF_TV'
+          plugins { id 'com.android.application' }
+          android {
+            namespace 'com.mylauncher.tv'
+            compileSdk 34
+            defaultConfig { applicationId 'com.mylauncher.tv'; minSdk 22; targetSdk 28; versionCode 1; versionName '1.0' }
+          }
+          EOF_TV
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF_TV'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.INTERNET"/>
+            <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+            <uses-feature android:name="android.software.leanback" android:required="false"/>
+            <uses-feature android:name="android.hardware.touchscreen" android:required="false"/>
+            <application android:label="Mi Launcher" android:icon="@drawable/banner" android:banner="@drawable/banner"
+                android:theme="@android:style/Theme.NoTitleBar.Fullscreen" android:allowBackup="false">
+              <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTask">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN"/>
+                  <category android:name="android.intent.category.LEANBACK_LAUNCHER"/>
+                  <category android:name="android.intent.category.LAUNCHER"/>
+                </intent-filter>
+              </activity>
+              <receiver android:name=".BootReceiver" android:exported="true">
+                <intent-filter><action android:name="android.intent.action.BOOT_COMPLETED"/></intent-filter>
+              </receiver>
+              <service android:name=".HomeService" android:exported="true" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                <intent-filter><action android:name="android.accessibilityservice.AccessibilityService"/></intent-filter>
+                <meta-data android:name="android.accessibilityservice" android:resource="@xml/hs"/>
+              </service>
+            </application>
+          </manifest>
+          EOF_TV
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/banner.xml <<'EOF_TV'
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+            <gradient android:startColor="#FF5B6CFF" android:endColor="#FF00D4B4" android:angle="315"/>
+          </shape>
+          EOF_TV
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/strings.xml <<'EOF_TV'
+          <resources><string name="hsd">Abre Mi Launcher al pulsar Inicio y al encender la TV</string></resources>
+          EOF_TV
+          mkdir -p app/src/main/res/xml
+          cat > app/src/main/res/xml/hs.xml <<'EOF_TV'
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+            android:accessibilityEventTypes="typeWindowStateChanged" android:accessibilityFeedbackType="feedbackGeneric"
+            android:accessibilityFlags="flagRequestFilterKeyEvents" android:canRequestFilterKeyEvents="true"
+            android:description="@string/hsd" android:notificationTimeout="100"/>
+          EOF_TV
+          mkdir -p app/src/main/java/com/mylauncher/tv
+          cat > app/src/main/java/com/mylauncher/tv/BootReceiver.java <<'EOF_TV'
+          package com.mylauncher.tv;
+          import android.content.*;
+          public class BootReceiver extends BroadcastReceiver {
+            @Override public void onReceive(Context c, Intent i) {
+              c.startActivity(new Intent(c, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            }
+          }
+          EOF_TV
+          mkdir -p app/src/main/java/com/mylauncher/tv
+          cat > app/src/main/java/com/mylauncher/tv/HomeService.java <<'EOF_TV'
+          package com.mylauncher.tv;
+          import android.accessibilityservice.AccessibilityService;
+          import android.content.*;
+          import android.view.KeyEvent;
+          import android.view.accessibility.AccessibilityEvent;
+          public class HomeService extends AccessibilityService {
+            final BroadcastReceiver r = new BroadcastReceiver() { public void onReceive(Context c, Intent i) { go(); } };
+            void go() {
+              startActivity(new Intent(this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
+            }
+            @Override protected void onServiceConnected() { registerReceiver(r, new IntentFilter(Intent.ACTION_SCREEN_ON)); }
+            @Override protected boolean onKeyEvent(KeyEvent e) {
+              if (e.getKeyCode() == KeyEvent.KEYCODE_HOME) { if (e.getAction() == KeyEvent.ACTION_UP) go(); return true; }
+              return false;
+            }
+            @Override public void onAccessibilityEvent(AccessibilityEvent e) {}
+            @Override public void onInterrupt() {}
+            @Override public void onDestroy() { try { unregisterReceiver(r); } catch (Exception x) {} super.onDestroy(); }
+          }
+          EOF_TV
+          mkdir -p app/src/main/java/com/mylauncher/tv
+          cat > app/src/main/java/com/mylauncher/tv/MainActivity.java <<'EOF_TV'
+          package com.mylauncher.tv;
+
+          import android.app.Activity;
+          import android.content.*;
+          import android.content.pm.*;
+          import android.graphics.*;
+          import android.graphics.drawable.*;
+          import android.os.*;
+          import android.provider.Settings;
+          import android.text.TextUtils;
+          import android.view.*;
+          import android.widget.*;
+          import java.io.*;
+          import java.net.*;
+          import java.text.SimpleDateFormat;
+          import java.util.*;
+          import org.json.JSONObject;
+
+          public class MainActivity extends Activity {
+            static final String CITY = "Barcelona";
+            static final double LAT = 41.39, LON = 2.17;
+            // {nombre, palabras clave (|), paquetes conocidos...}
+            static final String[][] APPS = {
+              {"Stremio", "stremio", "com.stremio.one"},
+              {"Nuvio TV", "nuvio"},
+              {"Filmin", "filmin"},
+              {"Movistar Plus+", "movistar", "es.plus.yomvi"},
+              {"Prime Video", "prime video", "com.amazon.avod"},
+              {"Netflix", "netflix", "com.netflix.ninja"},
+              {"Disney+", "disney", "com.disney.disneyplus"},
+              {"YouTube", "youtube", "com.amazon.firetv.youtube", "com.google.android.youtube.tv"},
+              {"AirPlay", "airplay|airreceiver"}
+            };
+
+            final Handler ui = new Handler(Looper.getMainLooper());
+            Wall wall; LinearLayout dock; TextView hello, wx, temp, clock;
+            int tick = 0, sz = 90;
+
+            int dp(int v) { return (int) (v * getResources().getDisplayMetrics().density); }
+            GradientDrawable box(int color, int stroke, int r) {
+              GradientDrawable g = new GradientDrawable(); g.setColor(color); g.setCornerRadius(dp(r));
+              if (stroke != 0) g.setStroke(dp(3), stroke); return g;
+            }
+            TextView text(float sp, boolean bold) {
+              TextView t = new TextView(this); t.setTextColor(Color.WHITE); t.setTextSize(sp);
+              t.setShadowLayer(8, 0, 2, 0x66000000); if (bold) t.setTypeface(Typeface.DEFAULT_BOLD); return t;
+            }
+
+            @Override protected void onCreate(Bundle b) {
+              super.onCreate(b);
+              FrameLayout root = new FrameLayout(this);
+              wall = new Wall(this); wall.mode = getSharedPreferences("p", 0).getInt("w", 0);
+              root.addView(wall, new FrameLayout.LayoutParams(-1, -1));
+
+              hello = text(38, true);
+              FrameLayout.LayoutParams hp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START);
+              hp.setMargins(dp(48), dp(36), 0, 0); root.addView(hello, hp);
+
+              LinearLayout pill = new LinearLayout(this); pill.setGravity(Gravity.CENTER_VERTICAL);
+              pill.setPadding(dp(22), dp(10), dp(22), dp(10)); pill.setBackground(box(0x33FFFFFF, 0, 26));
+              wx = text(13, false); temp = text(26, false); clock = text(26, false);
+              temp.setPadding(dp(26), 0, dp(26), 0);
+              pill.addView(wx); pill.addView(temp); pill.addView(clock);
+              FrameLayout.LayoutParams pp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
+              pp.setMargins(0, dp(30), dp(48), 0); root.addView(pill, pp);
+
+              dock = new LinearLayout(this); dock.setPadding(dp(18), dp(14), dp(18), dp(10));
+              dock.setBackground(box(0x55000000, 0x22FFFFFF, 34));
+              FrameLayout.LayoutParams dp2 = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+              dp2.bottomMargin = dp(80); root.addView(dock, dp2);
+
+              TextView hint = text(13, false); hint.setAlpha(0.6f); hint.setText("≡  Menú: cambiar fondo");
+              FrameLayout.LayoutParams hl = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+              hl.bottomMargin = dp(32); root.addView(hint, hl);
+              setContentView(root);
+            }
+
+            final Runnable loop = new Runnable() { public void run() {
+              Calendar c = Calendar.getInstance(); int h = c.get(Calendar.HOUR_OF_DAY);
+              hello.setText(h < 6 ? "Buenas noches" : h < 13 ? "Buenos días" : h < 20 ? "Buenas tardes" : "Buenas noches");
+              clock.setText(new SimpleDateFormat("HH:mm", Locale.getDefault()).format(c.getTime()));
+              if (tick++ % 45 == 0) weather();
+              ui.postDelayed(this, 20000);
+            } };
+
+            @Override protected void onResume() { super.onResume(); buildDock(); ui.removeCallbacks(loop); ui.post(loop); }
+            @Override protected void onPause() { super.onPause(); ui.removeCallbacks(loop); }
+            @Override protected void onNewIntent(Intent i) { super.onNewIntent(i); if (dock.getChildCount() > 0) dock.getChildAt(0).requestFocus(); }
+            @Override public void onBackPressed() {}
+            @Override public boolean onKeyDown(int k, KeyEvent e) {
+              if (k == KeyEvent.KEYCODE_MENU) { wall.next(getSharedPreferences("p", 0)); return true; }
+              return super.onKeyDown(k, e);
+            }
+
+            ResolveInfo find(List<ResolveInfo> all, String[] a, PackageManager pm) {
+              for (ResolveInfo r : all) for (int i = 2; i < a.length; i++) if (r.activityInfo.packageName.equals(a[i])) return r;
+              for (ResolveInfo r : all) {
+                String l = r.loadLabel(pm).toString().toLowerCase();
+                for (String k : a[1].split("\\|")) if (l.contains(k)) return r;
+              }
+              return null;
+            }
+
+            void buildDock() {
+              dock.removeAllViews(); PackageManager pm = getPackageManager();
+              List<ResolveInfo> all = new ArrayList<>();
+              for (String cat : new String[]{Intent.CATEGORY_LEANBACK_LAUNCHER, Intent.CATEGORY_LAUNCHER})
+                all.addAll(pm.queryIntentActivities(new Intent(Intent.ACTION_MAIN).addCategory(cat), 0));
+              List<String> names = new ArrayList<>(); List<ResolveInfo> found = new ArrayList<>();
+              for (String[] a : APPS) { ResolveInfo r = find(all, a, pm); if (r != null) { names.add(a[0]); found.add(r); } }
+              float wdp = getResources().getDisplayMetrics().widthPixels / getResources().getDisplayMetrics().density;
+              sz = (int) Math.max(48, Math.min(100, (wdp - 150) / (found.size() + 2) - 22));
+              for (int i = 0; i < found.size(); i++) {
+                final String pkg = found.get(i).activityInfo.packageName;
+                dock.addView(tile(names.get(i), found.get(i).loadIcon(pm), null, () -> open(pkg)));
+              }
+              dock.addView(tile("Inicio Amazon", null, "⌂", () -> { try {
+                startActivity(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME).setPackage("com.amazon.tv.launcher").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+              } catch (Exception e) {} }));
+              dock.addView(tile("Ajustes", null, "⚙", () -> { try { startActivity(new Intent(Settings.ACTION_SETTINGS)); } catch (Exception e) {} }));
+              dock.post(() -> dock.getChildAt(0).requestFocus());
+            }
+
+            void open(String pkg) {
+              PackageManager pm = getPackageManager(); Intent i = pm.getLeanbackLaunchIntentForPackage(pkg);
+              if (i == null) i = pm.getLaunchIntentForPackage(pkg);
+              if (i != null) startActivity(i);
+            }
+
+            View tile(String label, Drawable ic, String glyph, Runnable go) {
+              LinearLayout t = new LinearLayout(this); t.setOrientation(LinearLayout.VERTICAL);
+              t.setGravity(Gravity.CENTER_HORIZONTAL); t.setPadding(dp(8), dp(8), dp(8), dp(4)); t.setFocusable(true);
+              final FrameLayout f = new FrameLayout(this); f.setBackground(box(0xFF1C1C22, 0, 22));
+              f.setOutlineProvider(ViewOutlineProvider.BACKGROUND); f.setClipToOutline(true);
+              if (ic != null) {
+                ImageView v = new ImageView(this); v.setImageDrawable(ic); v.setPadding(dp(sz / 8), dp(sz / 8), dp(sz / 8), dp(sz / 8));
+                f.addView(v, new FrameLayout.LayoutParams(-1, -1));
+              } else {
+                TextView g = text(26, false); g.setGravity(Gravity.CENTER); g.setText(glyph); f.addView(g, new FrameLayout.LayoutParams(-1, -1));
+              }
+              t.addView(f, new LinearLayout.LayoutParams(dp(sz), dp(sz)));
+              final TextView lab = text(12, false); lab.setText(label); lab.setSingleLine(true);
+              lab.setEllipsize(TextUtils.TruncateAt.END); lab.setMaxWidth(dp(sz + 16)); lab.setGravity(Gravity.CENTER);
+              lab.setTextColor(0xAAFFFFFF); lab.setPadding(0, dp(6), 0, 0); t.addView(lab);
+              t.setOnClickListener(v -> go.run());
+              t.setOnFocusChangeListener((v, h) -> {
+                v.animate().scaleX(h ? 1.15f : 1f).scaleY(h ? 1.15f : 1f).translationY(h ? -dp(6) : 0).setDuration(160).start();
+                f.setBackground(box(0xFF1C1C22, h ? 0xFFFFFFFF : 0, 22)); lab.setTextColor(h ? 0xFFFFFFFF : 0xAAFFFFFF);
+              });
+              return t;
+            }
+
+            void weather() {
+              new Thread(() -> { try {
+                HttpURLConnection c = (HttpURLConnection) new URL("https://api.open-meteo.com/v1/forecast?latitude=" + LAT + "&longitude=" + LON + "&current=temperature_2m,weather_code").openConnection();
+                c.setConnectTimeout(8000); c.setReadTimeout(8000);
+                BufferedReader r = new BufferedReader(new InputStreamReader(c.getInputStream())); StringBuilder s = new StringBuilder(); String l;
+                while ((l = r.readLine()) != null) s.append(l);
+                JSONObject j = new JSONObject(s.toString()).getJSONObject("current");
+                final String a = CITY + "\n" + desc(j.getInt("weather_code")), b = Math.round(j.getDouble("temperature_2m")) + "°";
+                ui.post(() -> { wx.setText(a); temp.setText(b); });
+              } catch (Exception e) {} }).start();
+            }
+
+            static String desc(int c) {
+              return c == 0 ? "Despejado" : c < 3 ? "Poco nuboso" : c == 3 ? "Nublado" : c < 50 ? "Niebla" : c < 70 ? "Lluvia" : c < 80 ? "Nieve" : c < 90 ? "Chubascos" : "Tormenta";
+            }
+
+            static class Wall extends View {
+              int mode; final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+              final long t0 = System.currentTimeMillis(); final float[][] st = new float[100][3]; final Path path = new Path();
+              RadialGradient[][] sh; LinearGradient sky, shade;
+              static final int[][] COL = {{0xFF5B6CFF, 0xFF00D4B4, 0xFFB05CFF, 0xFF3AA0FF}, {0xFFFF6A88, 0xFFFFB86C, 0xFF7A5CFF, 0xFF3AD0FF}};
+              Wall(Context c) {
+                super(c); Random r = new Random(7);
+                for (float[] s : st) { s[0] = r.nextFloat(); s[1] = r.nextFloat(); s[2] = r.nextFloat() * 6.28f; }
+              }
+              void next(SharedPreferences sp) { mode = (mode + 1) % 4; sp.edit().putInt("w", mode).apply(); }
+              @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
+                sh = new RadialGradient[2][4];
+                for (int m = 0; m < 2; m++) for (int i = 0; i < 4; i++)
+                  sh[m][i] = new RadialGradient(0, 0, h * 0.8f, (COL[m][i] & 0xFFFFFF) | 0x99000000, COL[m][i] & 0xFFFFFF, Shader.TileMode.CLAMP);
+                sky = new LinearGradient(0, 0, 0, h, new int[]{0xFF2B2A4C, 0xFF9C5B63, 0xFFE8A87C}, null, Shader.TileMode.CLAMP);
+                shade = new LinearGradient(0, h * 0.55f, 0, h, 0, 0xCC000000, Shader.TileMode.CLAMP);
+              }
+              @Override protected void onDraw(Canvas c) {
+                int w = getWidth(), h = getHeight(); float t = (System.currentTimeMillis() - t0) / 1000f;
+                p.setShader(null);
+                if (mode <= 1) {
+                  c.drawColor(mode == 0 ? 0xFF05060F : 0xFF14081E); float sp = mode == 0 ? 0.15f : 0.35f;
+                  for (int i = 0; i < 4; i++) {
+                    c.save(); c.translate(w * (0.5f + 0.4f * (float) Math.sin(t * sp + i * 1.7f)), h * (0.5f + 0.35f * (float) Math.cos(t * sp * 0.8f + i * 2.3f)));
+                    p.setShader(sh[mode][i]); c.drawCircle(0, 0, h * 0.8f, p); c.restore();
+                  }
+                } else if (mode == 2) {
+                  c.drawColor(0xFF03040E);
+                  c.save(); c.translate(w * 0.7f, h * 0.35f); p.setShader(sh[0][2]); c.drawCircle(0, 0, h * 0.8f, p); c.restore(); p.setShader(null);
+                  for (float[] s : st) {
+                    p.setColor(Color.argb((int) (140 + 110 * Math.sin(t * 1.5f + s[2])), 255, 255, 255));
+                    c.drawCircle(s[0] * w, ((s[1] * h) + t * (3 + s[2] * 2)) % h, 1.5f + s[2] / 3f, p);
+                  }
+                } else {
+                  p.setShader(sky); c.drawRect(0, 0, w, h, p); p.setShader(null);
+                  int[] col = {0xFF6B4A5E, 0xFF4A3550, 0xFF241A33};
+                  for (int k = 0; k < 3; k++) {
+                    path.reset(); path.moveTo(0, h);
+                    for (int x = 0; x <= w; x += 20) path.lineTo(x, h * (0.62f + 0.1f * k) + h * 0.06f * (float) Math.sin(x * (0.002f + 0.0007f * k) + t * (0.15f + 0.05f * k) + k * 2));
+                    path.lineTo(w, h); path.close(); p.setColor(col[k]); c.drawPath(path, p);
+                  }
+                }
+                p.setShader(shade); c.drawRect(0, 0, w, h, p); p.setShader(null);
+                postInvalidateDelayed(40);
+              }
+            }
+          }
+          EOF_TV
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - run: gradle assembleDebug --no-daemon
+      - run: cp app/build/outputs/apk/debug/app-debug.apk launcher.apk
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Launcher ${{ github.run_number }}
+          files: launcher.apk
+          make_latest: true
